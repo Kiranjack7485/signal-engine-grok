@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Download and compile TA-Lib C library from official GitHub release (safer than SourceForge)
+# Download and compile TA-Lib C library from official GitHub release
 RUN wget https://github.com/TA-Lib/ta-lib/releases/download/v0.4.0/ta-lib-0.4.0-src.tar.gz \
     && tar -xzf ta-lib-0.4.0-src.tar.gz \
     && cd ta-lib \
@@ -23,15 +23,17 @@ WORKDIR /app
 # Copy requirements first (caching optimization)
 COPY requirements.txt .
 
-# Create virtual env and install Python packages
-RUN python -m venv /app/.venv \
+# Set env vars for TA-Lib Python wrapper to find C lib/headers, then install
+RUN export TA_INCLUDE_PATH=/usr/include/ta-lib \
+    && export TA_LIBRARY_PATH=/usr/lib \
+    && python -m venv /app/.venv \
     && /app/.venv/bin/pip install --no-cache-dir --upgrade pip \
     && /app/.venv/bin/pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of your code
 COPY . .
 
-# Activate venv in PATH
+# Activate venv in PATH (for runtime)
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Run your script (no web server needed)
