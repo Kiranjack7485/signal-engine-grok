@@ -1,5 +1,5 @@
-python-binance==1.0.19  # or latest version you have
-TA-Lib==0.4.28  # Python wrapper
+python-binance==1.0.19
+TA-Lib==0.4.28
 numpy==1.26.4
 requests==2.32.3
 pytz==2024.1
