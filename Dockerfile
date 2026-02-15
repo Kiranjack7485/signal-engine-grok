@@ -7,11 +7,11 @@ RUN apt-get update && apt-get install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Download, compile, install TA-Lib
+# Download, compile, install TA-Lib to /usr/local
 RUN wget https://github.com/TA-Lib/ta-lib/releases/download/v0.4.0/ta-lib-0.4.0-src.tar.gz \
     && tar -xzf ta-lib-0.4.0-src.tar.gz \
     && cd ta-lib \
-    && ./configure --prefix=/usr \
+    && ./configure --prefix=/usr/local \
     && make \
     && make install \
     && ldconfig \
@@ -24,9 +24,9 @@ WORKDIR /app
 # Copy requirements
 COPY requirements.txt .
 
-# Set env for TA-Lib (headers in /usr/include, libs in /usr/lib)
-ENV TA_INCLUDE_PATH=/usr/include
-ENV TA_LIBRARY_PATH=/usr/lib
+# Set env for TA-Lib wrapper to find C lib/headers
+ENV TA_INCLUDE_PATH=/usr/local/include
+ENV TA_LIBRARY_PATH=/usr/local/lib
 
 # Install Python deps
 RUN python -m venv /app/.venv \
