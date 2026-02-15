@@ -1,5 +1,5 @@
 python-binance==1.0.19
-TA-Lib @ https://github.com/Autoact/ta-lib/releases/download/0.4.28-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+TA-Lib @ https://github.com/cgohlke/talib-build/releases/download/v0.4.28/TA_Lib-0.4.28-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 numpy==1.26.4
 requests==2.32.3
 pytz==2024.1
