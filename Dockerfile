@@ -1,5 +1,5 @@
-# Use a slim Python base image
-FROM python:3.12-slim-bookworm
+# Downgrade to Python 3.11 for TA-Lib compatibility
+FROM python:3.11-slim-bookworm
 
 # Install build tools and wget
 RUN apt-get update && apt-get install -y \
