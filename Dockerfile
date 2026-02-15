@@ -1,40 +1,43 @@
-# Use a slim Python base image (compatible with Railway, lighter than full)
+# Use a slim Python base image
 FROM python:3.12-slim-bookworm
 
-# Install build tools and wget for downloading TA-Lib source
+# Install build tools and wget
 RUN apt-get update && apt-get install -y \
     build-essential \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Download and compile TA-Lib C library from official GitHub release
+# Download, compile, install TA-Lib
 RUN wget https://github.com/TA-Lib/ta-lib/releases/download/v0.4.0/ta-lib-0.4.0-src.tar.gz \
     && tar -xzf ta-lib-0.4.0-src.tar.gz \
     && cd ta-lib \
     && ./configure --prefix=/usr \
     && make \
     && make install \
+    && ldconfig \
     && cd .. \
     && rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
 
-# Set working directory for your app
+# Set working directory
 WORKDIR /app
 
-# Copy requirements first (caching optimization)
+# Copy requirements
 COPY requirements.txt .
 
-# Set env vars for TA-Lib Python wrapper to find C lib/headers, then install
-RUN export TA_INCLUDE_PATH=/usr/include/ta-lib \
-    && export TA_LIBRARY_PATH=/usr/lib \
-    && python -m venv /app/.venv \
+# Set env for TA-Lib (headers in /usr/include, libs in /usr/lib)
+ENV TA_INCLUDE_PATH=/usr/include
+ENV TA_LIBRARY_PATH=/usr/lib
+
+# Install Python deps
+RUN python -m venv /app/.venv \
     && /app/.venv/bin/pip install --no-cache-dir --upgrade pip \
     && /app/.venv/bin/pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of your code
+# Copy code
 COPY . .
 
-# Activate venv in PATH (for runtime)
+# Activate venv
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Run your script (no web server needed)
+# Run script
 CMD ["python", "main.py"]

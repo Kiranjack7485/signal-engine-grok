@@ -5,32 +5,25 @@ import talib
 import logging
 import requests
 from datetime import datetime
-import pytz  # pip install pytz if not already
-import os
+import pytz  # pip install pytz
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ── CONFIG ────────────────────────────────────────────────
+API_KEY = "KLWk0Hz7niXyKMyZdiwNEG8QI4X5yEu2pMotjtI6AMfC4HatblQ7XDyAxghLwbzy"
+API_SECRET = "ZtHmzyPpl8T3R3twCEdt1IdIFOTTBEbZNNhPfRO0zb8XGp4Rba76LVQoSqv42CMt"
+TELEGRAM_BOT_TOKEN = "8304346679:AAE-xCzuZpuq0-2gCjmVboLvR-rvm6m6mlA"
+TELEGRAM_CHAT_ID = "921422015"
 
-# ── CONFIG ────────────────────────────────────────────────
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+INTERVAL_SECONDS = 60  # Every 1 minute
+MIN_VOLUME_USDT_TEST = 100000
+FIXED_COINS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'LTCUSDT', 'LINKUSDT', 'DOTUSDT']
 
-if not all([API_KEY, API_SECRET, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
-    raise ValueError("Missing environment variables for config!")
-
-INTERVAL_SECONDS = 300
-MIN_VOLUME_USDT_TEST = 100000  # Keep low for testing
-TOP_N_TEST = 10  # For Phase 1 testing
-
-# For Phase 2+: We'll switch to this fixed high-legacy list
-LEGACY_TOP_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT']  # High-volume majors
-
-KLINE_INTERVAL = '5m'
+KLINE_INTERVALS = ['3m', '5m', '15m', '1h']  # Multi-timeframe check
 KLINE_LIMIT = 50
+MIN_SCORE_THRESHOLD = 7  # Only send strong signals (e.g., EMA + good volume)
+MAX_RETRIES = 5
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -45,28 +38,56 @@ def send_telegram_message(message):
 async def analyze_coin(client, candidate):
     symbol = candidate['symbol']
     try:
-        klines = await client.futures_klines(symbol=symbol, interval=KLINE_INTERVAL, limit=KLINE_LIMIT)
-        if len(klines) < KLINE_LIMIT:
+        # Multi-timeframe EMA alignment check
+        aligned_count = 0
+        last_price = None
+        last_vol = None
+        avg_vol = None
+        direction = None
+
+        for interval in KLINE_INTERVALS:
+            klines = await client.futures_klines(symbol=symbol, interval=interval, limit=KLINE_LIMIT)
+            if len(klines) < KLINE_LIMIT:
+                continue
+
+            closes = np.array([float(k[4]) for k in klines], dtype=float)
+            volumes = np.array([float(k[5]) for k in klines], dtype=float)
+
+            ema9 = talib.EMA(closes, timeperiod=9)[-1]
+            ema21 = talib.EMA(closes, timeperiod=21)[-1]
+
+            if np.isnan(ema9) or np.isnan(ema21):
+                continue
+
+            current_price = closes[-1]
+            current_vol = volumes[-1]
+            current_avg_vol = np.mean(volumes[-11:-1]) if len(volumes) > 10 else 0
+
+            if current_price > ema9 and current_price > ema21:
+                current_direction = 'long'
+            elif current_price < ema9 and current_price < ema21:
+                current_direction = 'short'
+            else:
+                continue  # No alignment in this timeframe
+
+            if direction is None:
+                direction = current_direction
+            elif direction != current_direction:
+                return None  # Conflicting directions across timeframes
+
+            aligned_count += 1
+            # Use the 5m data for final price/volume (as primary)
+            if interval == '5m':
+                last_price = current_price
+                last_vol = current_vol
+                avg_vol = current_avg_vol
+
+        # Require alignment in at least 3 timeframes for strong confirmation
+        if aligned_count < 3 or last_price is None:
             return None
 
-        closes = np.array([float(k[4]) for k in klines], dtype=float)
-        volumes = np.array([float(k[5]) for k in klines], dtype=float)
-
-        ema9 = talib.EMA(closes, timeperiod=9)[-1]
-        ema21 = talib.EMA(closes, timeperiod=21)[-1]
-        last_price = closes[-1]
-        last_vol = volumes[-1]
-        avg_vol = np.mean(volumes[-11:-1]) if len(volumes) > 10 else 0
-
-        if last_price > ema9 and last_price > ema21:
-            direction = 'long'
-        elif last_price < ema9 and last_price < ema21:
-            direction = 'short'
-        else:
-            return None
-
-        score = 4
-
+        # Volume check (same as before)
+        score = 4  # Base for EMA alignment
         vol_multiplier = last_vol / avg_vol if avg_vol > 0 else 0
         if vol_multiplier > 1.5:
             score += 6
@@ -74,6 +95,10 @@ async def analyze_coin(client, candidate):
             score += 3
 
         score = min(score, 10)
+
+        # Only return if strong (score >= threshold)
+        if score < MIN_SCORE_THRESHOLD:
+            return None
 
         return {
             'symbol': symbol,
@@ -90,11 +115,13 @@ async def analyze_coin(client, candidate):
 
 async def get_top_and_analyze(client):
     try:
-        tickers = await client.futures_ticker()
+        tickers = await client.futures_ticker(symbols=FIXED_COINS)
         candidates = []
         for t in tickers:
+            if 'symbol' not in t:  # Safety check for API response
+                continue
             symbol = t['symbol']
-            if not symbol.endswith('USDT'):
+            if symbol not in FIXED_COINS:  # Double-check only fixed
                 continue
             quote_vol = float(t.get('quoteVolume', '0') or 0)
             if quote_vol < MIN_VOLUME_USDT_TEST:
@@ -106,24 +133,19 @@ async def get_top_and_analyze(client):
             })
 
         if not candidates:
-            logger.warning("No candidates")
+            logger.warning("No fixed coins met volume threshold")
             return None
 
-        # Phase 1: sort by change % desc
+        # Sort by 24h change % desc
         candidates.sort(key=lambda x: x['change_24h_pct'], reverse=True)
-        top_n = candidates[:TOP_N_TEST]
-        logger.info(f"Top {TOP_N_TEST}: {[c['symbol'] for c in top_n]}")
+        logger.info(f"Fixed coins sorted: {[c['symbol'] for c in candidates]}")
 
-        # In Phase 2: replace above with filtering to LEGACY_TOP_SYMBOLS only
-        # e.g.: top_n = [c for c in candidates if c['symbol'] in LEGACY_TOP_SYMBOLS]
-        # then sort those by volume or change
-
-        analysis_tasks = [analyze_coin(client, c) for c in top_n]
+        analysis_tasks = [analyze_coin(client, c) for c in candidates]
         results = await asyncio.gather(*analysis_tasks)
         valid = [r for r in results if r]
 
         if not valid:
-            logger.info("No passes")
+            logger.info("No strong signals")
             return None
 
         best = max(valid, key=lambda x: (x['score'], x['change_24h_pct']))
@@ -147,26 +169,41 @@ async def get_top_and_analyze(client):
 **SL**: {sl}
 **Leverage**: {leverage}
 
-**Reason**: EMA + volume test | Vol ${best['volume_usdt']/1e6:.1f}M
+**Reason**: Multi-TF EMA alignment + volume | Vol ${best['volume_usdt']/1e6:.1f}M
 
 Test only!
 """
         send_telegram_message(message)
-        logger.info(f"Sent for {best['symbol']}")
+        logger.info(f"Sent strong signal for {best['symbol']}")
 
     except Exception as e:
         logger.error(f"Error: {e}")
 
 async def main():
-    client = await AsyncClient.create(API_KEY, API_SECRET)
-
+    client = None
     try:
         while True:
-            logger.info("Scan start...")
-            await get_top_and_analyze(client)
+            retry_count = 0
+            while retry_count < MAX_RETRIES:
+                try:
+                    if client is None:
+                        client = await AsyncClient.create(API_KEY, API_SECRET)
+                    logger.info("Scan start...")
+                    await get_top_and_analyze(client)
+                    break
+                except Exception as e:
+                    logger.error(f"Scan failed (retry {retry_count+1}/{MAX_RETRIES}): {e}")
+                    retry_count += 1
+                    if client:
+                        await client.close_connection()
+                        client = None
+                    await asyncio.sleep(10)
+            if retry_count == MAX_RETRIES:
+                logger.error("Max retries reached - skipping this scan")
             await asyncio.sleep(INTERVAL_SECONDS)
     finally:
-        await client.close_connection()
+        if client:
+            await client.close_connection()
 
 if __name__ == "__main__":
     asyncio.run(main())
