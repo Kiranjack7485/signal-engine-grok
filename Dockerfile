@@ -24,7 +24,15 @@ WORKDIR /app
 COPY requirements.txt .
 
 RUN pip install --upgrade pip
-RUN pip install --no-cache-dir -r requirements.txt
+
+# Install numpy first (important!)
+RUN pip install --no-cache-dir numpy==1.26.4
+
+# Install TA-Lib without build isolation (so it uses installed numpy)
+RUN pip install --no-cache-dir --no-build-isolation TA-Lib==0.4.28
+
+# Install remaining dependencies
+RUN pip install --no-cache-dir python-binance==1.0.19 requests==2.32.3 pytz==2024.1
 
 COPY . .
 
