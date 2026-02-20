@@ -44,7 +44,7 @@ PRIMARY_INTERVAL        = '5m'
 KLINE_LIMIT             = 60
 
 MIN_SCORE_THRESHOLD     = 7.0
-MIN_ALIGNED_TF          = 3                 # Fixed: defined here before use
+MIN_ALIGNED_TF          = 3
 
 # Two trading windows (IST, weekdays only)
 WINDOW_1_START = (18, 0)    # 6:00 PM
@@ -105,7 +105,6 @@ async def get_klines(exchange, symbol, interval):
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=interval, limit=KLINE_LIMIT)
         if len(ohlcv) < KLINE_LIMIT - 5:
             return None
-        # Convert to Binance-like format: [timestamp, open, high, low, close, volume]
         return [[ohlcv[i][0], ohlcv[i][1], ohlcv[i][2], ohlcv[i][3], ohlcv[i][4], ohlcv[i][5]] for i in range(len(ohlcv))]
     except Exception as e:
         logger.error(f"Klines fail {symbol} {interval}: {e}")
@@ -379,33 +378,37 @@ async def check_pending_confirmations(exchange, window_name):
         if conf['direction'] != pending['direction']:
             reason.append("Direction flipped")
         else:
-            if (pending['direction'] == 'long' and conf['macd_cross'] == 1) or \
-               (pending['direction'] == 'short' and conf['macd_cross'] == -1):
-                reason.append("MACD crossover confirmed")
+            # Relaxed MACD: just no opposite cross
+            if (pending['direction'] == 'long' and conf['macd_cross'] != -1) or \
+               (pending['direction'] == 'short' and conf['macd_cross'] != 1):
+                reason.append("MACD still supportive")
                 confirmed = True
             else:
-                reason.append("No MACD confirmation")
+                reason.append("MACD flipped against")
 
-            if conf['vol_mult'] >= 1.2:
-                reason.append("Volume strong")
+            # Volume still decent (relaxed from 1.2 → 1.0)
+            if conf['vol_mult'] >= 1.0:
+                reason.append("Volume still decent")
             else:
-                reason.append("Volume dropped")
+                reason.append("Volume dropped too much")
 
+            # RSI safe zone
             if 25 < conf['rsi_5m'] < 75:
                 reason.append("RSI in safe zone")
             else:
                 reason.append("RSI extreme")
+                confirmed = False
 
+            # BTC alignment (relaxed: optional bonus)
             btc_data = await analyze_coin(exchange, {'symbol': 'BTC/USDT:USDT', 'change_24h_pct': 0, 'volume_usdt': 0}, is_confirmation=True)
             if btc_data and btc_data['direction'] == pending['direction']:
                 reason.append("BTC aligned")
             else:
-                reason.append("BTC not aligned")
-                confirmed = False
+                reason.append("BTC not aligned (warning only)")
 
         if confirmed:
             ist_now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S IST')
-            trend = "Bullish LONG" if conf['direction'] == 'long' else "Bearish 📉 SHORT"
+            trend = "Bullish LONG" if conf['direction'] == 'long' else "Bearish SHORT"
 
             msg = f"""
 **✅ DOUBLE-CONFIRMED ENTRY @ {ist_now}** ({window_name})
@@ -429,7 +432,16 @@ async def check_pending_confirmations(exchange, window_name):
             logger.info(f"Confirmed entry: {symbol} {conf['direction']}")
 
             last_signals[symbol] = conf
-            to_remove.append(symbol)
+        else:
+            # Relaxed follow-up: only stop if clearly invalid
+            if "flipped" in reason or "extreme" in reason:
+                msg = f"⚠️ {symbol} – trade no longer valid (reasons: {', '.join(reason)}). Consider exit."
+            else:
+                msg = f"📊 {symbol} – still holding but weak (reasons: {', '.join(reason)}). Monitor closely."
+            send_telegram_message(msg)
+            logger.info(f"Follow-up sent for {symbol}: {msg[:100]}...")
+
+        to_remove.append(symbol)
 
     for s in to_remove:
         pending_setups.pop(s, None)
