@@ -15,14 +15,14 @@ logger = logging.getLogger(__name__)
 # ── Load credentials from .env ──────────────────────────────────────────────
 load_dotenv()
 
-API_KEY            = os.getenv("BYBIT_API_KEY")
-API_SECRET         = os.getenv("BYBIT_API_SECRET")
+API_KEY            = os.getenv("API_KEY")
+API_SECRET         = os.getenv("API_SECRET")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
 required_vars = {
-    "BYBIT_API_KEY":     API_KEY,
-    "BYBIT_API_SECRET":  API_SECRET,
+    "API_KEY":     API_KEY,
+    "API_SECRET":  API_SECRET,
     "TELEGRAM_BOT_TOKEN":  TELEGRAM_BOT_TOKEN,
     "TELEGRAM_CHAT_ID":    TELEGRAM_CHAT_ID,
 }
@@ -37,7 +37,7 @@ logger.info("Credentials loaded from .env successfully")
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 INTERVAL_SECONDS        = 60
-FIXED_COINS             = ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'BNB/USDT:USDT', 'XRP/USDT:USDT']
+FIXED_COINS             = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT']
 
 KLINE_INTERVALS         = ['3m', '5m', '15m', '1h']
 PRIMARY_INTERVAL        = '5m'
@@ -53,8 +53,7 @@ WINDOW_1_END   = (23, 30)   # 11:30 PM
 WINDOW_2_START = (9, 15)    # 9:15 AM
 WINDOW_2_END   = (15, 30)   # 3:30 PM
 
-# Risk settings
-ACCOUNT_SIZE            = 10000.0
+# Risk & Trading settings
 RISK_PER_TRADE_PCT      = 0.005
 SL_PCT                  = 0.008
 MIN_RISK_REWARD_RATIO   = 2.5
@@ -62,27 +61,41 @@ TP2_PCT                 = 0.035
 
 MIN_SETUP_SCORE         = 7.0
 MIN_CONFIRMED_SCORE     = 6.5
+MIN_BALANCE_USDT        = 35
+CAPITAL_PER_TRADE_PCT   = 0.4
+LEVERAGE                = 5
+MAX_CONCURRENT_TRADES   = 2
+MAX_HOLD_TIME_MIN       = 10
+PARTIAL_PROFIT_PCT      = 0.5
+
+TEST_MODE               = False  # REAL TRADING as per your request
+
+# Enhanced strategy params
+ADX_PERIOD              = 14
+ADX_RANGE_THRESHOLD     = 25  # <25 = range, >=25 = trend/breakout
+SR_LOOKBACK             = 20  # periods for support/resistance
+SPREAD_MAX_PCT          = 0.1  # max bid-ask spread allowed
+VOLUME_SURGE_MULTIPLIER = 1.5  # for breakout confirmation
 
 # ── GLOBAL STATE ────────────────────────────────────────────────────────────
-last_signals    = {}    # Active confirmed trades
-pending_setups  = {}    # Pending setups waiting for confirmation
+last_signals    = {}
+pending_setups  = {}
+open_trades     = {}  # symbol → {'entry_time': dt, 'position_size': float, 'side': str, 'entry_price': float, 'sl': float, 'tp1': float, 'tp2': float}
+ACCOUNT_SIZE    = 0.0
 
 def is_trading_window():
     now_ist = datetime.now(pytz.timezone('Asia/Kolkata'))
-    
-    if now_ist.weekday() > 4:  # No weekends
+    if now_ist.weekday() > 4:
         return False, "Weekend – no trading"
     
     hour, minute = now_ist.hour, now_ist.minute
     current_min = hour * 60 + minute
     
-    # Window 1: 18:00 – 23:30
     w1_start = WINDOW_1_START[0] * 60 + WINDOW_1_START[1]
     w1_end   = WINDOW_1_END[0]   * 60 + WINDOW_1_END[1]
     if w1_start <= current_min <= w1_end:
         return True, "Evening window (6:00 PM – 11:30 PM)"
     
-    # Window 2: 9:15 – 15:30
     w2_start = WINDOW_2_START[0] * 60 + WINDOW_2_START[1]
     w2_end   = WINDOW_2_END[0]   * 60 + WINDOW_2_END[1]
     if w2_start <= current_min <= w2_end:
@@ -99,6 +112,53 @@ def send_telegram_message(message):
         logger.info("Telegram sent")
     except Exception as e:
         logger.error(f"Telegram fail: {e}")
+
+async def get_balance(exchange):
+    try:
+        balance = await exchange.fetch_balance(params={'type': 'future'})
+        usdt_balance = balance.get('USDT', {}).get('free', 0)
+        logger.info(f"Available USDT balance: ${usdt_balance:.2f}")
+        return usdt_balance
+    except Exception as e:
+        logger.error(f"Balance fetch fail: {e}")
+        return 0
+
+async def get_open_positions(exchange):
+    try:
+        positions = await exchange.fetch_positions(params={'type': 'future'})
+        open_pos = [p for p in positions if float(p.get('contracts', 0)) > 0]
+        if open_pos:
+            pos_str = ', '.join([f"{p['symbol']}: {p['contracts']} ({p['side']}) @ ${p['entryPrice']:.2f}" for p in open_pos])
+            logger.info(f"Current open positions: {pos_str}")
+            msg = f"Bot logged into Binance Futures. Current balance: ${ACCOUNT_SIZE:.2f}. Open positions: {pos_str if pos_str else 'None'}"
+        else:
+            logger.info("No current open positions")
+            msg = f"Bot logged into Binance Futures. Current balance: ${ACCOUNT_SIZE:.2f}. No open positions."
+        send_telegram_message(msg)
+        return open_pos
+    except Exception as e:
+        logger.error(f"Positions fetch fail: {e}")
+        return []
+
+async def place_order(exchange, symbol, side, amount, price=None, leverage=LEVERAGE):
+    try:
+        await exchange.set_leverage(leverage, symbol)
+        params = {'marginMode': 'isolated'}
+        if price:
+            order = await exchange.create_limit_order(symbol, side, amount, price, params=params)
+        else:
+            order = await exchange.create_market_order(symbol, side, amount, params=params)
+        logger.info(f"Placed {side} order for {symbol}: {order}")
+        return order
+    except Exception as e:
+        logger.error(f"Order placement fail {symbol}: {e}")
+        return None
+
+async def close_position(exchange, symbol, side, amount, reason):
+    close_side = 'sell' if side == 'buy' else 'buy'
+    order = await place_order(exchange, symbol, close_side, amount)
+    if order:
+        logger.info(f"Closed {amount} of {symbol} ({reason})")
 
 async def get_klines(exchange, symbol, interval):
     try:
@@ -226,15 +286,28 @@ async def analyze_coin(exchange, candidate, is_confirmation=False):
         macd, macdsignal, _ = talib.MACD(closes, 12, 26, 9)
         macd_cross = check_macd_crossover(macd, macdsignal)
 
-        # Scoring
+        # Enhanced scoring with pro strategies
         score = 4.0 + (aligned_count - MIN_ALIGNED_TF) * 1.5
-        score += min(vol_mult - 1.5, 4) * 3.0 if vol_mult > 1.5 else 0
+
+        # 1. Volume surge (Momentum/Breakout)
+        if vol_mult > VOLUME_SURGE_MULTIPLIER:
+            score += 2.0
+
+        # 2. Price Action + Candles
+        if direction == 'long' and bull_pat > 0:
+            score += 1.5
+        elif direction == 'short' and bear_pat > 0:
+            score += 1.5
+
+        # 3. BB Squeeze + RSI
         score += bb_bonus * 1.5
         score += div_bonus if direction == 'long' else -div_bonus
-        score += bull_pat * 1.2 if direction == 'long' else bear_pat * 1.2
 
-        if direction == 'long' and rsi_val > 50:   score -= 1.0
-        if direction == 'short' and rsi_val < 50: score -= 1.0
+        # 4. RSI filter
+        if direction == 'long' and rsi_val > 50:
+            score -= 1.0
+        if direction == 'short' and rsi_val < 50:
+            score -= 1.0
 
         score = round(max(min(score, 10), 0), 1)
 
@@ -378,7 +451,6 @@ async def check_pending_confirmations(exchange, window_name):
         if conf['direction'] != pending['direction']:
             reason.append("Direction flipped")
         else:
-            # Relaxed MACD: just no opposite cross
             if (pending['direction'] == 'long' and conf['macd_cross'] != -1) or \
                (pending['direction'] == 'short' and conf['macd_cross'] != 1):
                 reason.append("MACD still supportive")
@@ -386,25 +458,19 @@ async def check_pending_confirmations(exchange, window_name):
             else:
                 reason.append("MACD flipped against")
 
-            # Volume still decent (relaxed from 1.2 → 1.0)
             if conf['vol_mult'] >= 1.0:
                 reason.append("Volume still decent")
             else:
                 reason.append("Volume dropped too much")
 
-            # RSI safe zone
             if 25 < conf['rsi_5m'] < 75:
                 reason.append("RSI in safe zone")
             else:
                 reason.append("RSI extreme")
-                confirmed = False
 
-            # BTC alignment (relaxed: optional bonus)
-            btc_data = await analyze_coin(exchange, {'symbol': 'BTC/USDT:USDT', 'change_24h_pct': 0, 'volume_usdt': 0}, is_confirmation=True)
+            btc_data = await analyze_coin(exchange, {'symbol': 'BTC/USDT', 'change_24h_pct': 0, 'volume_usdt': 0}, is_confirmation=True)
             if btc_data and btc_data['direction'] == pending['direction']:
                 reason.append("BTC aligned")
-            else:
-                reason.append("BTC not aligned (warning only)")
 
         if confirmed:
             ist_now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S IST')
@@ -433,8 +499,7 @@ async def check_pending_confirmations(exchange, window_name):
 
             last_signals[symbol] = conf
         else:
-            # Relaxed follow-up: only stop if clearly invalid
-            if "flipped" in reason or "extreme" in reason:
+            if "flipped" in ', '.join(reason) or "extreme" in ', '.join(reason):
                 msg = f"⚠️ {symbol} – trade no longer valid (reasons: {', '.join(reason)}). Consider exit."
             else:
                 msg = f"📊 {symbol} – still holding but weak (reasons: {', '.join(reason)}). Monitor closely."
@@ -454,13 +519,16 @@ async def main():
             while retry_count < 5:
                 try:
                     if exchange is None:
-                        exchange = ccxt.bybit({
+                        exchange = ccxt.binance({
                             'apiKey': API_KEY,
                             'secret': API_SECRET,
                             'enableRateLimit': True,
                             'options': {'defaultType': 'future'},
                         })
-                        logger.info("Connected to Bybit API")
+                        logger.info("Successfully logged into Binance Futures API")
+                        global ACCOUNT_SIZE
+                        ACCOUNT_SIZE = await get_balance(exchange)
+                        await get_open_positions(exchange)
                     logger.info("Starting scan cycle...")
                     await get_top_and_analyze(exchange)
                     break
