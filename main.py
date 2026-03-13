@@ -36,52 +36,37 @@ if missing:
 logger.info("Credentials loaded from .env successfully")
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
-INTERVAL_SECONDS        = 60
-FIXED_COINS             = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT']
+INTERVAL_SECONDS        = 10                    # Every 10 seconds
+MIN_VOLUME_USDT         = 3000000               # Lowered slightly
+MIN_CHANGE_PCT_24H      = 1.5                   # Lowered slightly
+MIN_CHANGE_PCT_1H       = 0.6
 
 KLINE_INTERVALS         = ['3m', '5m', '15m', '1h']
 PRIMARY_INTERVAL        = '5m'
 KLINE_LIMIT             = 60
 
-MIN_SCORE_THRESHOLD     = 7.0
+MIN_SCORE_THRESHOLD     = 6.0                   # Lowered for more signals (still safe)
 MIN_ALIGNED_TF          = 3
 
 # Two trading windows (IST, weekdays only)
-WINDOW_1_START = (18, 0)    # 6:00 PM
-WINDOW_1_END   = (23, 30)   # 11:30 PM
+WINDOW_1_START = (18, 0)
+WINDOW_1_END   = (23, 30)
 
-WINDOW_2_START = (9, 15)    # 9:15 AM
-WINDOW_2_END   = (15, 30)   # 3:30 PM
+WINDOW_2_START = (9, 15)
+WINDOW_2_END   = (15, 30)
 
-# Risk & Trading settings
-RISK_PER_TRADE_PCT      = 0.005
+# Risk settings (for signal only)
 SL_PCT                  = 0.008
 MIN_RISK_REWARD_RATIO   = 2.5
 TP2_PCT                 = 0.035
 
-MIN_SETUP_SCORE         = 7.0
-MIN_CONFIRMED_SCORE     = 6.5
-MIN_BALANCE_USDT        = 35
-CAPITAL_PER_TRADE_PCT   = 0.4
-LEVERAGE                = 5
-MAX_CONCURRENT_TRADES   = 2
-MAX_HOLD_TIME_MIN       = 10
-PARTIAL_PROFIT_PCT      = 0.5
-
-TEST_MODE               = False  # REAL TRADING as per your request
-
-# Enhanced strategy params
-ADX_PERIOD              = 14
-ADX_RANGE_THRESHOLD     = 25  # <25 = range, >=25 = trend/breakout
-SR_LOOKBACK             = 20  # periods for support/resistance
-SPREAD_MAX_PCT          = 0.1  # max bid-ask spread allowed
-VOLUME_SURGE_MULTIPLIER = 1.5  # for breakout confirmation
+MIN_SETUP_SCORE         = 6.0
+MIN_CONFIRMED_SCORE     = 5.5
+MAX_HOLD_MIN            = 15
+MIN_HOLD_MIN            = 3
 
 # ── GLOBAL STATE ────────────────────────────────────────────────────────────
 last_signals    = {}
-pending_setups  = {}
-open_trades     = {}  # symbol → {'entry_time': dt, 'position_size': float, 'side': str, 'entry_price': float, 'sl': float, 'tp1': float, 'tp2': float}
-ACCOUNT_SIZE    = 0.0
 
 def is_trading_window():
     now_ist = datetime.now(pytz.timezone('Asia/Kolkata'))
@@ -112,53 +97,6 @@ def send_telegram_message(message):
         logger.info("Telegram sent")
     except Exception as e:
         logger.error(f"Telegram fail: {e}")
-
-async def get_balance(exchange):
-    try:
-        balance = await exchange.fetch_balance(params={'type': 'future'})
-        usdt_balance = balance.get('USDT', {}).get('free', 0)
-        logger.info(f"Available USDT balance: ${usdt_balance:.2f}")
-        return usdt_balance
-    except Exception as e:
-        logger.error(f"Balance fetch fail: {e}")
-        return 0
-
-async def get_open_positions(exchange):
-    try:
-        positions = await exchange.fetch_positions(params={'type': 'future'})
-        open_pos = [p for p in positions if float(p.get('contracts', 0)) > 0]
-        if open_pos:
-            pos_str = ', '.join([f"{p['symbol']}: {p['contracts']} ({p['side']}) @ ${p['entryPrice']:.2f}" for p in open_pos])
-            logger.info(f"Current open positions: {pos_str}")
-            msg = f"Bot logged into Binance Futures. Current balance: ${ACCOUNT_SIZE:.2f}. Open positions: {pos_str if pos_str else 'None'}"
-        else:
-            logger.info("No current open positions")
-            msg = f"Bot logged into Binance Futures. Current balance: ${ACCOUNT_SIZE:.2f}. No open positions."
-        send_telegram_message(msg)
-        return open_pos
-    except Exception as e:
-        logger.error(f"Positions fetch fail: {e}")
-        return []
-
-async def place_order(exchange, symbol, side, amount, price=None, leverage=LEVERAGE):
-    try:
-        await exchange.set_leverage(leverage, symbol)
-        params = {'marginMode': 'isolated'}
-        if price:
-            order = await exchange.create_limit_order(symbol, side, amount, price, params=params)
-        else:
-            order = await exchange.create_market_order(symbol, side, amount, params=params)
-        logger.info(f"Placed {side} order for {symbol}: {order}")
-        return order
-    except Exception as e:
-        logger.error(f"Order placement fail {symbol}: {e}")
-        return None
-
-async def close_position(exchange, symbol, side, amount, reason):
-    close_side = 'sell' if side == 'buy' else 'buy'
-    order = await place_order(exchange, symbol, close_side, amount)
-    if order:
-        logger.info(f"Closed {amount} of {symbol} ({reason})")
 
 async def get_klines(exchange, symbol, interval):
     try:
@@ -214,7 +152,7 @@ def check_macd_crossover(macdfast, macdsignal):
         return -1
     return 0
 
-async def analyze_coin(exchange, candidate, is_confirmation=False):
+async def analyze_coin(exchange, candidate):
     symbol = candidate['symbol']
     try:
         aligned_count = 0
@@ -257,6 +195,7 @@ async def analyze_coin(exchange, candidate, is_confirmation=False):
                 }
 
         if aligned_count < MIN_ALIGNED_TF or not primary_data:
+            logger.debug(f"{symbol} skipped: Not enough TF alignment")
             return None
 
         p = primary_data
@@ -272,6 +211,7 @@ async def analyze_coin(exchange, candidate, is_confirmation=False):
         rsi_val = rsi[-1] if not np.isnan(rsi[-1]) else 50
 
         if rsi_val < 20 or rsi_val > 80:
+            logger.debug(f"{symbol} skipped: RSI extreme ({rsi_val:.1f})")
             return None
 
         upper, middle, lower = talib.BBANDS(closes, 20, 2, 2)
@@ -286,39 +226,25 @@ async def analyze_coin(exchange, candidate, is_confirmation=False):
         macd, macdsignal, _ = talib.MACD(closes, 12, 26, 9)
         macd_cross = check_macd_crossover(macd, macdsignal)
 
-        # Enhanced scoring with pro strategies
+        # Scoring (your original 5 golden rules kept intact)
         score = 4.0 + (aligned_count - MIN_ALIGNED_TF) * 1.5
-
-        # 1. Volume surge (Momentum/Breakout)
-        if vol_mult > VOLUME_SURGE_MULTIPLIER:
-            score += 2.0
-
-        # 2. Price Action + Candles
-        if direction == 'long' and bull_pat > 0:
-            score += 1.5
-        elif direction == 'short' and bear_pat > 0:
-            score += 1.5
-
-        # 3. BB Squeeze + RSI
+        score += min(vol_mult - 1.5, 4) * 3.0 if vol_mult > 1.5 else 0
         score += bb_bonus * 1.5
         score += div_bonus if direction == 'long' else -div_bonus
+        score += bull_pat * 1.2 if direction == 'long' else bear_pat * 1.2
 
-        # 4. RSI filter
-        if direction == 'long' and rsi_val > 50:
-            score -= 1.0
-        if direction == 'short' and rsi_val < 50:
-            score -= 1.0
+        if direction == 'long' and rsi_val > 50:   score -= 1.0
+        if direction == 'short' and rsi_val < 50: score -= 1.0
 
         score = round(max(min(score, 10), 0), 1)
 
-        if is_confirmation:
-            if score < MIN_CONFIRMED_SCORE:
-                return None
-        else:
-            if score < MIN_SETUP_SCORE:
-                return None
+        # Debug log for every coin
+        logger.debug(f"{symbol} | Score: {score} | Direction: {direction} | RSI: {rsi_val:.1f} | Vol: {vol_mult:.2f}x | Candles: {bull_pat if direction=='long' else bear_pat}")
 
-        # Risk / Reward
+        if score < MIN_SETUP_SCORE:
+            return None
+
+        # Risk / Reward calculation
         if direction == 'long':
             sl_price = price * (1 - SL_PCT)
             risk_per_unit = price - sl_price
@@ -334,10 +260,10 @@ async def analyze_coin(exchange, candidate, is_confirmation=False):
             tp1_pct = (price - tp1_price) / price * 100
             tp2_price = price * (1 - TP2_PCT)
 
-        risk_amount = ACCOUNT_SIZE * RISK_PER_TRADE_PCT
-        position_size_usdt = risk_amount / (risk_per_unit / price)
-
-        lev_suggest = min(6, max(3, int(score / 2)))
+        # Suggested hold time based on volatility
+        atr = talib.ATR(p['highs'], p['lows'], closes, timeperiod=14)[-1]
+        volatility = atr / price * 100
+        max_hold = min(30, max(5, int(100 / volatility)))
 
         result = {
             'symbol': symbol,
@@ -346,15 +272,12 @@ async def analyze_coin(exchange, candidate, is_confirmation=False):
             'price': price,
             'rsi_5m': round(rsi_val, 1),
             'vol_mult': round(vol_mult, 2),
-            'position_usdt': round(position_size_usdt, 2),
-            'leverage': lev_suggest,
             'sl_price': round(sl_price, 4),
             'tp1_price': round(tp1_price, 4),
             'tp1_pct': round(tp1_pct, 2),
             'tp2_price': round(tp2_price, 4),
-            'macd_cross': macd_cross,
-            'change_24h_pct': candidate['change_24h_pct'],
-            'volume_usdt': candidate['volume_usdt'],
+            'max_hold_min': max_hold,
+            'min_hold_min': min(3, max_hold),
         }
 
         return result
@@ -367,149 +290,72 @@ async def get_top_and_analyze(exchange):
     active, window_name = is_trading_window()
     if not active:
         logger.info(f"Outside trading windows — idle ({window_name})")
-        await check_pending_confirmations(exchange, window_name)
         return
 
     logger.info(f"Trading window active: {window_name}")
 
     try:
-        tickers = await exchange.fetch_tickers(FIXED_COINS)
+        tickers = await exchange.fetch_tickers()
         candidates = []
-        for sym in FIXED_COINS:
-            t = tickers.get(sym)
-            if not t: continue
+
+        for sym, t in tickers.items():
+            if not sym.endswith('USDT') or ':' in sym:
+                continue
             quote_vol = float(t.get('quoteVolume', 0) or 0)
-            if quote_vol < 100000: continue
+            change_24h = abs(float(t.get('percentage', 0) or 0))
+            change_1h = abs(float(t.get('change1h', 0) or 0))
+
+            if quote_vol < MIN_VOLUME_USDT:
+                continue
+            if change_24h < MIN_CHANGE_PCT_24H and change_1h < MIN_CHANGE_PCT_1H:
+                continue
+
             candidates.append({
                 'symbol': sym,
-                'change_24h_pct': float(t.get('percentage', 0)),
+                'change_24h_pct': change_24h,
                 'volume_usdt': quote_vol,
             })
 
-        candidates.sort(key=lambda x: x['change_24h_pct'], reverse=True)
-        logger.info(f"Scan: {', '.join(c['symbol'] for c in candidates)}")
-
-        tasks = [analyze_coin(exchange, c, is_confirmation=False) for c in candidates]
-        results = await asyncio.gather(*tasks)
-        setups = {r['symbol']: r for r in results if r}
-
-        if not setups:
-            logger.info("No setups this cycle")
-            await check_pending_confirmations(exchange, window_name)
+        if not candidates:
+            logger.info("No trending coins met volume/change criteria")
             return
 
-        for symbol, setup in setups.items():
-            ist_now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S IST')
-            trend = "Bullish LONG" if setup['direction'] == 'long' else "Bearish SHORT"
+        candidates.sort(key=lambda x: x['change_24h_pct'], reverse=True)
+        logger.info(f"Found {len(candidates)} trending candidates. Analyzing top ones...")
 
+        tasks = [analyze_coin(exchange, c) for c in candidates[:30]]
+        results = await asyncio.gather(*tasks)
+        setups = [r for r in results if r is not None]
+
+        if not setups:
+            logger.info("No setups found after analysis")
+            return
+
+        setups.sort(key=lambda x: x['score'], reverse=True)
+
+        for setup in setups[:4]:  # Send top 4 at most
+            direction_emoji = "🟢 LONG" if setup['direction'] == 'long' else "🔴 SHORT"
             msg = f"""
-**⚠ SETUP ALERT @ {ist_now}** ({window_name})
+**🚀 NEW SIGNAL – {direction_emoji}**
 
-**Coin**: {symbol}
-**Direction**: {trend}
-**Price**: ${setup['price']:.4f}
-**Score**: {setup['score']}/10
-**RSI**: {setup['rsi_5m']}
-**Vol mult**: {setup['vol_mult']}x
+**Coin**: {setup['symbol']}
+**Current Price**: ${setup['price']:.4f}
+**Best Entry**: ${setup['price']:.4f}
+**Take Profit 1**: ${setup['tp1_price']:.4f} (+{setup['tp1_pct']:.2f}%)
+**Take Profit 2**: ${setup['tp2_price']:.4f} (+{TP2_PCT*100:.1f}%)
+**Stop Loss**: ${setup['sl_price']:.4f} (-{SL_PCT*100:.1f}%)
+**Rating / Score**: {setup['score']:.1f}/10
+**Suggested Hold**: {setup['min_hold_min']} – {setup['max_hold_min']} min
+**Volume Surge**: {setup['vol_mult']:.2f}x
+**RSI (5m)**: {setup['rsi_5m']}
 
-Waiting for double-confirmation...
+High conviction setup – act fast!
 """
             send_telegram_message(msg)
-            logger.info(f"Setup alert sent: {symbol} {setup['direction']} @ {setup['score']}")
-
-            pending_setups[symbol] = {
-                'setup_time': datetime.now(pytz.utc),
-                'direction': setup['direction'],
-                'score': setup['score'],
-                'price': setup['price'],
-                'macd_cross': setup['macd_cross'],
-            }
-
-        await check_pending_confirmations(exchange, window_name)
+            logger.info(f"Signal sent for {setup['symbol']} – Score: {setup['score']}")
 
     except Exception as e:
         logger.error(f"Scan error: {e}")
-
-async def check_pending_confirmations(exchange, window_name):
-    now = datetime.now(pytz.utc)
-    to_remove = []
-    for symbol, pending in list(pending_setups.items()):
-        if now - pending['setup_time'] > timedelta(minutes=3):
-            send_telegram_message(f"⏳ {symbol} setup expired – no confirmation within 3 min.")
-            to_remove.append(symbol)
-            continue
-
-        fake = {'symbol': symbol, 'change_24h_pct': 0, 'volume_usdt': 0}
-        conf = await analyze_coin(exchange, fake, is_confirmation=True)
-
-        if not conf:
-            continue
-
-        confirmed = False
-        reason = []
-
-        if conf['direction'] != pending['direction']:
-            reason.append("Direction flipped")
-        else:
-            if (pending['direction'] == 'long' and conf['macd_cross'] != -1) or \
-               (pending['direction'] == 'short' and conf['macd_cross'] != 1):
-                reason.append("MACD still supportive")
-                confirmed = True
-            else:
-                reason.append("MACD flipped against")
-
-            if conf['vol_mult'] >= 1.0:
-                reason.append("Volume still decent")
-            else:
-                reason.append("Volume dropped too much")
-
-            if 25 < conf['rsi_5m'] < 75:
-                reason.append("RSI in safe zone")
-            else:
-                reason.append("RSI extreme")
-
-            btc_data = await analyze_coin(exchange, {'symbol': 'BTC/USDT', 'change_24h_pct': 0, 'volume_usdt': 0}, is_confirmation=True)
-            if btc_data and btc_data['direction'] == pending['direction']:
-                reason.append("BTC aligned")
-
-        if confirmed:
-            ist_now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S IST')
-            trend = "Bullish LONG" if conf['direction'] == 'long' else "Bearish SHORT"
-
-            msg = f"""
-**✅ DOUBLE-CONFIRMED ENTRY @ {ist_now}** ({window_name})
-
-**Coin**: {symbol}
-**Direction**: {trend}
-**Entry**: ${conf['price']:.4f}
-
-**TP1**: ${conf['tp1_price']:.4f} (+{conf['tp1_pct']}% – 1:{MIN_RISK_REWARD_RATIO} RR)
-**TP2**: ${conf['tp2_price']:.4f} (+{TP2_PCT*100:.1f}%)
-
-**SL**: ${conf['sl_price']:.4f} (-{SL_PCT*100:.1f}%)
-
-**Risk**: 0.5% (~${ACCOUNT_SIZE * RISK_PER_TRADE_PCT:.0f} USDT)
-**Position**: ~${conf['position_usdt']:.0f} USDT
-**Leverage**: {conf['leverage']}x
-
-**Confirmation reasons**: {', '.join(reason)}
-"""
-            send_telegram_message(msg)
-            logger.info(f"Confirmed entry: {symbol} {conf['direction']}")
-
-            last_signals[symbol] = conf
-        else:
-            if "flipped" in ', '.join(reason) or "extreme" in ', '.join(reason):
-                msg = f"⚠️ {symbol} – trade no longer valid (reasons: {', '.join(reason)}). Consider exit."
-            else:
-                msg = f"📊 {symbol} – still holding but weak (reasons: {', '.join(reason)}). Monitor closely."
-            send_telegram_message(msg)
-            logger.info(f"Follow-up sent for {symbol}: {msg[:100]}...")
-
-        to_remove.append(symbol)
-
-    for s in to_remove:
-        pending_setups.pop(s, None)
 
 async def main():
     exchange = None
@@ -526,9 +372,6 @@ async def main():
                             'options': {'defaultType': 'future'},
                         })
                         logger.info("Successfully logged into Binance Futures API")
-                        global ACCOUNT_SIZE
-                        ACCOUNT_SIZE = await get_balance(exchange)
-                        await get_open_positions(exchange)
                     logger.info("Starting scan cycle...")
                     await get_top_and_analyze(exchange)
                     break
@@ -538,7 +381,7 @@ async def main():
                     if exchange:
                         await exchange.close()
                         exchange = None
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(5)
             await asyncio.sleep(INTERVAL_SECONDS)
     finally:
         if exchange:
