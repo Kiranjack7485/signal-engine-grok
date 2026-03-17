@@ -15,14 +15,14 @@ logger = logging.getLogger(__name__)
 # ── Load credentials from .env ──────────────────────────────────────────────
 load_dotenv()
 
-API_KEY            = os.getenv("API_KEY")
-API_SECRET         = os.getenv("API_SECRET")
+API_KEY            = os.getenv("BYBIT_API_KEY")
+API_SECRET         = os.getenv("BYBIT_API_SECRET")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
 required_vars = {
-    "API_KEY":     API_KEY,
-    "API_SECRET":  API_SECRET,
+    "BYBIT_API_KEY":     API_KEY,
+    "BYBIT_API_SECRET":  API_SECRET,
     "TELEGRAM_BOT_TOKEN":  TELEGRAM_BOT_TOKEN,
     "TELEGRAM_CHAT_ID":    TELEGRAM_CHAT_ID,
 }
@@ -36,37 +36,38 @@ if missing:
 logger.info("Credentials loaded from .env successfully")
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
-INTERVAL_SECONDS        = 10                    # Every 10 seconds
-MIN_VOLUME_USDT         = 3000000               # Lowered slightly
-MIN_CHANGE_PCT_24H      = 1.5                   # Lowered slightly
-MIN_CHANGE_PCT_1H       = 0.6
+INTERVAL_SECONDS        = 10                    # Scan every 10 seconds
+
+MIN_VOLUME_USDT         = 3000000               # Minimum 24h volume
+MIN_CHANGE_PCT_24H      = 1.5                   # Minimum absolute 24h % change
+MIN_CHANGE_PCT_1H       = 0.6                   # Minimum absolute 1h % change
 
 KLINE_INTERVALS         = ['3m', '5m', '15m', '1h']
 PRIMARY_INTERVAL        = '5m'
 KLINE_LIMIT             = 60
 
-MIN_SCORE_THRESHOLD     = 6.0                   # Lowered for more signals (still safe)
+MIN_SCORE_THRESHOLD     = 6.5                   # Slightly relaxed for more signals while keeping safety
 MIN_ALIGNED_TF          = 3
 
 # Two trading windows (IST, weekdays only)
-WINDOW_1_START = (18, 0)
-WINDOW_1_END   = (23, 30)
+WINDOW_1_START = (18, 0)    # 6:00 PM
+WINDOW_1_END   = (23, 30)   # 11:30 PM
 
-WINDOW_2_START = (9, 15)
-WINDOW_2_END   = (15, 30)
+WINDOW_2_START = (9, 15)    # 9:15 AM
+WINDOW_2_END   = (15, 30)   # 3:30 PM
 
-# Risk settings (for signal only)
+# Risk settings for signal only
 SL_PCT                  = 0.008
 MIN_RISK_REWARD_RATIO   = 2.5
 TP2_PCT                 = 0.035
 
-MIN_SETUP_SCORE         = 6.0
-MIN_CONFIRMED_SCORE     = 5.5
+MIN_SETUP_SCORE         = 6.5
+MIN_CONFIRMED_SCORE     = 6.0
 MAX_HOLD_MIN            = 15
 MIN_HOLD_MIN            = 3
 
 # ── GLOBAL STATE ────────────────────────────────────────────────────────────
-last_signals    = {}
+last_signals    = {}    # To avoid duplicate signals in short time
 
 def is_trading_window():
     now_ist = datetime.now(pytz.timezone('Asia/Kolkata'))
@@ -195,7 +196,6 @@ async def analyze_coin(exchange, candidate):
                 }
 
         if aligned_count < MIN_ALIGNED_TF or not primary_data:
-            logger.debug(f"{symbol} skipped: Not enough TF alignment")
             return None
 
         p = primary_data
@@ -211,7 +211,6 @@ async def analyze_coin(exchange, candidate):
         rsi_val = rsi[-1] if not np.isnan(rsi[-1]) else 50
 
         if rsi_val < 20 or rsi_val > 80:
-            logger.debug(f"{symbol} skipped: RSI extreme ({rsi_val:.1f})")
             return None
 
         upper, middle, lower = talib.BBANDS(closes, 20, 2, 2)
@@ -226,7 +225,7 @@ async def analyze_coin(exchange, candidate):
         macd, macdsignal, _ = talib.MACD(closes, 12, 26, 9)
         macd_cross = check_macd_crossover(macd, macdsignal)
 
-        # Scoring (your original 5 golden rules kept intact)
+        # Your original 5 golden rules scoring (untouched)
         score = 4.0 + (aligned_count - MIN_ALIGNED_TF) * 1.5
         score += min(vol_mult - 1.5, 4) * 3.0 if vol_mult > 1.5 else 0
         score += bb_bonus * 1.5
@@ -237,9 +236,6 @@ async def analyze_coin(exchange, candidate):
         if direction == 'short' and rsi_val < 50: score -= 1.0
 
         score = round(max(min(score, 10), 0), 1)
-
-        # Debug log for every coin
-        logger.debug(f"{symbol} | Score: {score} | Direction: {direction} | RSI: {rsi_val:.1f} | Vol: {vol_mult:.2f}x | Candles: {bull_pat if direction=='long' else bear_pat}")
 
         if score < MIN_SETUP_SCORE:
             return None
@@ -295,6 +291,7 @@ async def get_top_and_analyze(exchange):
     logger.info(f"Trading window active: {window_name}")
 
     try:
+        # Fetch ALL USDT perpetual futures
         tickers = await exchange.fetch_tickers()
         candidates = []
 
@@ -317,23 +314,26 @@ async def get_top_and_analyze(exchange):
             })
 
         if not candidates:
-            logger.info("No trending coins met volume/change criteria")
+            logger.info("No trending coins met criteria this cycle")
             return
 
+        # Take top 10 strongest
         candidates.sort(key=lambda x: x['change_24h_pct'], reverse=True)
-        logger.info(f"Found {len(candidates)} trending candidates. Analyzing top ones...")
+        top_candidates = candidates[:10]
 
-        tasks = [analyze_coin(exchange, c) for c in candidates[:30]]
+        logger.info(f"Analyzing top 10 trending coins: {[c['symbol'] for c in top_candidates]}")
+
+        tasks = [analyze_coin(exchange, c) for c in top_candidates]
         results = await asyncio.gather(*tasks)
         setups = [r for r in results if r is not None]
 
         if not setups:
-            logger.info("No setups found after analysis")
+            logger.info("No strong setups found after 5-rule analysis")
             return
 
         setups.sort(key=lambda x: x['score'], reverse=True)
 
-        for setup in setups[:4]:  # Send top 4 at most
+        for setup in setups[:3]:  # Max 3 signals per cycle
             direction_emoji = "🟢 LONG" if setup['direction'] == 'long' else "🔴 SHORT"
             msg = f"""
 **🚀 NEW SIGNAL – {direction_emoji}**
@@ -365,13 +365,13 @@ async def main():
             while retry_count < 5:
                 try:
                     if exchange is None:
-                        exchange = ccxt.binance({
+                        exchange = ccxt.bybit({
                             'apiKey': API_KEY,
                             'secret': API_SECRET,
                             'enableRateLimit': True,
                             'options': {'defaultType': 'future'},
                         })
-                        logger.info("Successfully logged into Binance Futures API")
+                        logger.info("Successfully logged into Bybit API")
                     logger.info("Starting scan cycle...")
                     await get_top_and_analyze(exchange)
                     break
