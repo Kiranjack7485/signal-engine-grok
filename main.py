@@ -46,7 +46,7 @@ KLINE_INTERVALS         = ['3m', '5m', '15m', '1h']
 PRIMARY_INTERVAL        = '5m'
 KLINE_LIMIT             = 60
 
-MIN_SCORE_THRESHOLD     = 6.0                  # Slightly relaxed for more signals while keeping safety
+MIN_SCORE_THRESHOLD     = 6.5
 MIN_ALIGNED_TF          = 3
 
 # Two trading windows (IST, weekdays only)
@@ -291,16 +291,18 @@ async def get_top_and_analyze(exchange):
     logger.info(f"Trading window active: {window_name}")
 
     try:
-        # Fetch ALL USDT perpetual futures
+        # Fetch ALL tickers
         tickers = await exchange.fetch_tickers()
         candidates = []
 
         for sym, t in tickers.items():
-            if not sym.endswith('USDT') or ':' in sym:
+            # Bybit USDT perpetuals: end with USDT, no colon (e.g. BTCUSDT)
+            if not sym.endswith('USDT') or ':' in sym or 'PERP' in sym or 'SPOT' in sym.upper():
                 continue
+
             quote_vol = float(t.get('quoteVolume', 0) or 0)
             change_24h = abs(float(t.get('percentage', 0) or 0))
-            change_1h = abs(float(t.get('change1h', 0) or 0))
+            change_1h = abs(float(t.get('change1h', 0) or 0))  # fallback if not present
 
             if quote_vol < MIN_VOLUME_USDT:
                 continue
