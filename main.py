@@ -36,7 +36,7 @@ if missing:
 logger.info("Credentials loaded from .env successfully")
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
-INTERVAL_SECONDS        = 10                    # Scan every 10 seconds
+INTERVAL_SECONDS        = 10                    # Every 10 seconds
 
 MIN_VOLUME_USDT         = 3000000               # Minimum 24h volume
 MIN_CHANGE_PCT_24H      = 1.5                   # Minimum absolute 24h % change
@@ -67,7 +67,7 @@ MAX_HOLD_MIN            = 15
 MIN_HOLD_MIN            = 3
 
 # ── GLOBAL STATE ────────────────────────────────────────────────────────────
-last_signals    = {}    # To avoid duplicate signals in short time
+last_signals    = {}    # To avoid duplicate signals
 
 def is_trading_window():
     now_ist = datetime.now(pytz.timezone('Asia/Kolkata'))
@@ -296,13 +296,13 @@ async def get_top_and_analyze(exchange):
         candidates = []
 
         for sym, t in tickers.items():
-            # Bybit USDT perpetuals: end with USDT, no colon (e.g. BTCUSDT)
-            if not sym.endswith('USDT') or ':' in sym or 'PERP' in sym or 'SPOT' in sym.upper():
+            # Strict Bybit USDT perpetual futures filter
+            if not (sym.endswith('USDT') and ':' not in sym and 'PERP' not in sym and len(sym) > 5 and 'SPOT' not in sym.upper()):
                 continue
 
             quote_vol = float(t.get('quoteVolume', 0) or 0)
             change_24h = abs(float(t.get('percentage', 0) or 0))
-            change_1h = abs(float(t.get('change1h', 0) or 0))  # fallback if not present
+            change_1h = abs(float(t.get('change1h', 0) or 0))  # fallback
 
             if quote_vol < MIN_VOLUME_USDT:
                 continue
@@ -316,7 +316,7 @@ async def get_top_and_analyze(exchange):
             })
 
         if not candidates:
-            logger.info("No trending coins met criteria this cycle")
+            logger.info("No trending USDT perpetual futures found this cycle")
             return
 
         # Take top 10 strongest
