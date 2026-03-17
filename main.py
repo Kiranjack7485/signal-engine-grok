@@ -46,7 +46,7 @@ KLINE_INTERVALS         = ['3m', '5m', '15m', '1h']
 PRIMARY_INTERVAL        = '5m'
 KLINE_LIMIT             = 60
 
-MIN_SCORE_THRESHOLD     = 6.5                   # Slightly relaxed for more signals while keeping safety
+MIN_SCORE_THRESHOLD     = 6.0                  # Slightly relaxed for more signals while keeping safety
 MIN_ALIGNED_TF          = 3
 
 # Two trading windows (IST, weekdays only)
