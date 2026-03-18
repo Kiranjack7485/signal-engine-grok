@@ -27,7 +27,7 @@ SYMBOLS = [
 ]
 
 TIMEFRAME = "15"
-SCAN_INTERVAL_SEC = 60                    # ← Changed to 60 seconds
+SCAN_INTERVAL_SEC = 60
 MIN_SCORE_THRESHOLD = 7.5
 
 DEFAULT_LEVERAGE = 8
@@ -42,7 +42,7 @@ if not BYBIT_API_KEY or not BYBIT_API_SECRET:
 
 print("✅ Environment loaded")
 print(f"Trading hours (UTC): {ALLOWED_SESSIONS_UTC}")
-print("Starting Strong Long-Term Trend Scanner (60s interval)...\n")
+print(f"Scanner running every {SCAN_INTERVAL_SEC} seconds...\n")
 
 session = HTTP(testnet=False, api_key=BYBIT_API_KEY, api_secret=BYBIT_API_SECRET)
 
@@ -65,9 +65,9 @@ def send_telegram(message: str):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-def get_klines(symbol, interval="15", limit=200):
+def get_klines(symbol):
     try:
-        resp = session.get_kline(category="linear", symbol=symbol, interval=interval, limit=limit)
+        resp = session.get_kline(category="linear", symbol=symbol, interval=TIMEFRAME, limit=200)
         if resp.get("retCode") != 0:
             print(f"API Error {symbol}: {resp.get('retMsg')}")
             return None
@@ -81,7 +81,7 @@ def get_klines(symbol, interval="15", limit=200):
         return None
 
 def calculate_indicators(df):
-    if len(df) < 55:
+    if len(df) < 60:
         return df
     close = df["close"]
     df["ema21"] = EMAIndicator(close, window=21).ema_indicator()
@@ -89,14 +89,14 @@ def calculate_indicators(df):
     df["rsi"]   = RSIIndicator(close, window=14).rsi()
     
     stoch = StochasticOscillator(high=df["high"], low=df["low"], close=close,
-                                 window=14, smooth_window=3, fillna=True)
+                                window=14, smooth_window=3, fillna=True)
     df["stoch_k"] = stoch.stoch()
     df["stoch_d"] = stoch.stoch_signal()
     return df
 
 def score_and_analyze(df, symbol):
     if len(df) < 60 or df["ema55"].isna().all():
-        return 0, "NEUTRAL", {"rsi": 0.0, "stoch_k": 0.0, "vol_ratio": 0.0, "details": "Insufficient data"}
+        return 0, "NEUTRAL", {"score": 0, "rsi": 0.0, "stoch_k": 0.0, "vol_ratio": 0.0, "details": "Insufficient data"}
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
@@ -105,32 +105,37 @@ def score_and_analyze(df, symbol):
     details = []
     trend = "NEUTRAL"
 
-    # Trend Detection
-    if last["close"] > last["ema21"] > last["ema55"]:
-        trend = "LONG"
-        score += 2
-        details.append("✅ Strong EMA Bullish Stack")
-        if last["rsi"] > 52 and prev["rsi"] <= 52:
-            score += 1
-            details.append("✅ RSI Bull Cross")
-        if last["stoch_k"] > last["stoch_d"] and prev["stoch_k"] <= prev["stoch_d"] and last["stoch_k"] < 40:
-            score += 1
-            details.append("✅ Stoch Bull Cross")
-    elif last["close"] < last["ema21"] < last["ema55"]:
-        trend = "SHORT"
-        score += 2
-        details.append("✅ Strong EMA Bearish Stack")
-        if last["rsi"] < 48 and prev["rsi"] >= 48:
-            score += 1
-            details.append("✅ RSI Bear Cross")
-        if last["stoch_k"] < last["stoch_d"] and prev["stoch_k"] >= prev["stoch_d"] and last["stoch_k"] > 60:
-            score += 1
-            details.append("✅ Stoch Bear Cross")
+    # === Rule 1: Strong Trend ===
+    if pd.notna(last["ema21"]) and pd.notna(last["ema55"]):
+        if last["close"] > last["ema21"] > last["ema55"]:
+            trend = "LONG"
+            score += 2
+            details.append("✅ Strong EMA Bullish Stack")
+            if pd.notna(last["rsi"]) and pd.notna(prev["rsi"]):
+                if last["rsi"] > 52 and prev["rsi"] <= 52:
+                    score += 1
+                    details.append("✅ RSI Bull Cross")
+            if pd.notna(last["stoch_k"]) and pd.notna(prev["stoch_k"]) and pd.notna(last["stoch_d"]):
+                if last["stoch_k"] > last["stoch_d"] and prev["stoch_k"] <= prev["stoch_d"] and last["stoch_k"] < 40:
+                    score += 1
+                    details.append("✅ Stoch Bull Cross")
+        elif last["close"] < last["ema21"] < last["ema55"]:
+            trend = "SHORT"
+            score += 2
+            details.append("✅ Strong EMA Bearish Stack")
+            if pd.notna(last["rsi"]) and pd.notna(prev["rsi"]):
+                if last["rsi"] < 48 and prev["rsi"] >= 48:
+                    score += 1
+                    details.append("✅ RSI Bear Cross")
+            if pd.notna(last["stoch_k"]) and pd.notna(prev["stoch_k"]) and pd.notna(last["stoch_d"]):
+                if last["stoch_k"] < last["stoch_d"] and prev["stoch_k"] >= prev["stoch_d"] and last["stoch_k"] > 60:
+                    score += 1
+                    details.append("✅ Stoch Bear Cross")
 
     if trend == "NEUTRAL":
-        return 0, "NEUTRAL", {"rsi": round(last["rsi"],1), "stoch_k": round(last["stoch_k"],1), "vol_ratio": 0.0, "details": "No trend"}
+        return 0, "NEUTRAL", {"score": 0, "rsi": round(last.get("rsi",0),1), "stoch_k": round(last.get("stoch_k",0),1), "vol_ratio": 0.0, "details": "No trend"}
 
-    # Sustained Trend (last 5 candles)
+    # Sustained Trend Filter
     sustained = sum(1 for i in range(1, 6) 
                     if (trend == "LONG" and df.iloc[-i]["close"] > df.iloc[-i]["ema21"]) or
                        (trend == "SHORT" and df.iloc[-i]["close"] < df.iloc[-i]["ema21"]))
@@ -148,15 +153,17 @@ def score_and_analyze(df, symbol):
         score += 2
         details.append("✅ At Major Swing High")
 
-    # Volume
+    # Volume Surge
     avg_vol = df["volume"].iloc[-40:-1].mean()
-    vol_ratio = last["volume"] / avg_vol if avg_vol > 0 else 0
+    vol_ratio = last["volume"] / avg_vol if avg_vol > 0 else 0.0
     if vol_ratio > 2.0:
         score += 2
         details.append(f"✅ Strong Volume Surge {vol_ratio:.1f}x")
 
     score = min(10, score)
+
     return score, trend, {
+        "score": score,
         "rsi": round(last.get("rsi", 0), 1),
         "stoch_k": round(last.get("stoch_k", 0), 1),
         "vol_ratio": round(vol_ratio, 1),
@@ -169,7 +176,7 @@ def scan_all():
         return
 
     now = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"\n🔍 [{now}] STRONG TREND SCAN (15-min, every 60s) - {len(SYMBOLS)} pairs...")
+    print(f"\n🔍 [{now}] STRONG TREND SCAN (15-min) - {len(SYMBOLS)} pairs...")
 
     best_score = 0
     best_setup = None
@@ -182,21 +189,21 @@ def scan_all():
         df = get_klines(sym)
         if df is None:
             print(f"{sym:<8} Fetch Error")
-            time.sleep(0.5)
+            time.sleep(0.6)
             continue
 
         df = calculate_indicators(df)
         score, trend, info = score_and_analyze(df, sym)
 
-        print(f"{sym:<8} {trend:<6} {info.get('score',0):<6} {info.get('rsi',0):<6} "
-              f"{info.get('stoch_k',0):<7} {info.get('vol_ratio',0):<7} {info.get('details','No setup')[:55]}")
+        print(f"{sym:<8} {trend:<6} {info['score']:<6} {info['rsi']:<6} "
+              f"{info['stoch_k']:<7} {info['vol_ratio']:<7} {info['details'][:60]}")
 
         if score > best_score:
             best_score = score
             best_symbol = sym
-            best_setup = {"symbol": sym.replace("USDT",""), "score": score, **info}
+            best_setup = {"symbol": sym.replace("USDT",""), **info}
 
-        time.sleep(0.6)   # ← Rate limit protection
+        time.sleep(0.7)  # Rate limit safety
 
     print("-" * 95)
     print(f"Best this cycle → {best_symbol} | Score: {best_score}/10\n")
@@ -226,7 +233,7 @@ def scan_all():
 # ────────────────────────────────────────────────
 schedule.every(SCAN_INTERVAL_SEC).seconds.do(scan_all)
 
-print("🚀 Scanner started with 60-second interval and fixed indicators.\n")
+print("🚀 Strong Trend Scanner Started Successfully (Score bug fixed)\n")
 
 while True:
     schedule.run_pending()
