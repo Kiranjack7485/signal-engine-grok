@@ -10,10 +10,10 @@ from pybit.unified_trading import HTTP
 from ta.trend import EMAIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
 
-load_dotenv()
+load_dotenv(override=True)
 
 # ────────────────────────────────────────────────
-#  CONFIG
+#  CONFIG - ALL CONSTANTS DEFINED FIRST
 # ────────────────────────────────────────────────
 BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
@@ -26,14 +26,26 @@ SYMBOLS = [
     "LINKUSDT", "DOTUSDT", "BCHUSDT", "LTCUSDT", "NEARUSDT"
 ]
 
-TIMEFRAME = "15"                    # ← Changed to 15-min for strong trends
+TIMEFRAME = "15"
 SCAN_INTERVAL_SEC = 10
-MIN_SCORE_THRESHOLD = 7.5           # ← Rolled back to original strict level
+MIN_SCORE_THRESHOLD = 7.5
 
 DEFAULT_LEVERAGE = 8
 PARTIAL_PCT = 50
 
+# ←←← MOVED HERE (must be defined before any function uses it)
 ALLOWED_SESSIONS_UTC = [(13, 17), (3, 10)]
+
+# ────────────────────────────────────────────────
+#  Basic validation
+# ────────────────────────────────────────────────
+if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+    print("❌ Error: BYBIT_API_KEY or BYBIT_API_SECRET is missing in environment variables!")
+    exit(1)
+
+print("✅ Environment loaded successfully")
+print(f"Trading hours (UTC): {ALLOWED_SESSIONS_UTC}")
+print("Starting Strong Long-Term Trend Scanner...\n")
 
 # ────────────────────────────────────────────────
 session = HTTP(testnet=False, api_key=BYBIT_API_KEY, api_secret=BYBIT_API_SECRET)
@@ -48,7 +60,7 @@ def is_trading_time():
 
 def send_telegram(message: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[DRY] Telegram would send:\n", message[:300] + "...")
+        print("[DRY RUN] Telegram message:\n", message[:300] + "...")
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -67,7 +79,8 @@ def get_klines(symbol, interval="15", limit=200):
         df = df.astype(float).sort_values("timestamp")
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         return df
-    except:
+    except Exception as e:
+        print(f"Kline error {symbol}: {e}")
         return None
 
 def calculate_indicators(df):
@@ -83,7 +96,7 @@ def calculate_indicators(df):
     return df
 
 def score_and_analyze(df, symbol):
-    if len(df) < 60:   # Need more data for strong trend confirmation
+    if len(df) < 60:
         return 0, "NEUTRAL", {}
 
     last = df.iloc[-1]
@@ -93,7 +106,6 @@ def score_and_analyze(df, symbol):
     details = []
     trend = "NEUTRAL"
 
-    # Rule 1: Strong Trend + Momentum (slower EMAs)
     if last["close"] > last["ema21"] > last["ema55"]:
         trend = "LONG"
         score += 2
@@ -118,19 +130,15 @@ def score_and_analyze(df, symbol):
     if trend == "NEUTRAL":
         return 0, "NEUTRAL", {}
 
-    # === NEW: Sustained Trend Filter (must hold for ~1 hour) ===
-    sustained_count = 0
-    for i in range(1, 6):  # last 5 candles
-        candle = df.iloc[-i]
-        if trend == "LONG" and candle["close"] > candle["ema21"]:
-            sustained_count += 1
-        elif trend == "SHORT" and candle["close"] < candle["ema21"]:
-            sustained_count += 1
+    # Sustained Trend Filter
+    sustained_count = sum(1 for i in range(1, 6) 
+                          if (trend == "LONG" and df.iloc[-i]["close"] > df.iloc[-i]["ema21"]) or
+                             (trend == "SHORT" and df.iloc[-i]["close"] < df.iloc[-i]["ema21"]))
     if sustained_count >= 4:
         score += 2
-        details.append("✅ Strong Sustained Trend (5 bars)")
+        details.append("✅ Strong Sustained Trend")
 
-    # Rule 2: Key Level (longer lookback)
+    # Key Level & Volume
     recent_low = df["low"].iloc[-30:].min()
     recent_high = df["high"].iloc[-30:].max()
     if trend == "LONG" and abs(last["close"] - recent_low) / last["close"] < 0.005:
@@ -140,7 +148,6 @@ def score_and_analyze(df, symbol):
         score += 2
         details.append("✅ At Major Swing High")
 
-    # Rule 3: Volume Surge
     avg_vol = df["volume"].iloc[-40:-1].mean()
     vol_ratio = last["volume"] / avg_vol if avg_vol > 0 else 0
     if vol_ratio > 2.0:
@@ -148,16 +155,12 @@ def score_and_analyze(df, symbol):
         details.append(f"✅ Strong Volume Surge {vol_ratio:.1f}x")
 
     score = min(10, score)
-    analysis = {
+    return score, trend, {
         "trend": trend,
         "score": round(score, 1),
-        "rsi": round(last["rsi"], 1),
-        "stoch_k": round(last["stoch_k"], 1),
-        "vol_ratio": round(vol_ratio, 1),
         "details": " | ".join(details),
         "df": df
     }
-    return score, trend, analysis
 
 def scan_all():
     if not is_trading_time():
@@ -182,8 +185,8 @@ def scan_all():
         df = calculate_indicators(df)
         score, trend, info = score_and_analyze(df, sym)
 
-        print(f"{sym:<8} {trend:<6} {info.get('score',0):<6} {info.get('rsi',0):<6} "
-              f"{info.get('stoch_k',0):<7} {info.get('vol_ratio',0):<7} {info.get('details','No setup')[:55]}")
+        print(f"{sym:<8} {trend:<6} {info.get('score',0):<6} {info.get('rsi',0):<6.1f} "
+              f"{info.get('stoch_k',0):<7.1f} {info.get('vol_ratio',0):<7.1f} {info.get('details','No setup')[:55]}")
 
         if score > best_score:
             best_score = score
@@ -197,7 +200,6 @@ def scan_all():
         d = best_setup
         last_close = d["df"].iloc[-1]["close"]
         entry = round(last_close, 2)
-        
         atr = (d["df"]["high"] - d["df"]["low"]).iloc[-20:].mean()
         sl = round(entry - atr*1.2 if d["trend"]=="LONG" else entry + atr*1.2, 2)
         tp = round(entry + atr*2.4 if d["trend"]=="LONG" else entry - atr*2.4, 2)
@@ -219,8 +221,7 @@ def scan_all():
 # ────────────────────────────────────────────────
 schedule.every(SCAN_INTERVAL_SEC).seconds.do(scan_all)
 
-print("✅ STRONG LONG-TERM TREND SCANNER STARTED")
-print("Only signals with sustained trend (≥7.5 score) will be sent.\n")
+print("🚀 STRONG LONG-TERM TREND SCANNER STARTED SUCCESSFULLY\n")
 
 while True:
     schedule.run_pending()

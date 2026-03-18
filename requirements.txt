@@ -1,6 +1,8 @@
-ccxt==4.2.51
-ta-lib==0.6.8
-numpy==1.26.4
-requests==2.32.3
-pytz==2024.1
-python-dotenv==1.0.1
+pybit>=5.0.0
+pandas>=2.0.0
+ta>=0.10.2
+schedule>=1.2.0
+requests>=2.32.0
+python-dotenv>=1.0.0
+pytz>=2024.0
+numpy>=1.26.0
